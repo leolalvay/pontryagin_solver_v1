@@ -1,138 +1,527 @@
-# `core/shooting.py` — Nonlinear shooting system $F(z)=0$ for the discrete smoothed PMP
+# `core/shooting.py` — Newton-ready shooting wrappers
 
-This module is the **bridge** between:
+This module provides a thin interface between:
 
-- the **discretized PMP dynamics** (implemented as residual blocks in `core/integrators.py`), and
-- the **Newton solver** (implemented in `core/newton.py`).
+1. the discrete PMP residual and Jacobian assembly in `core/integrators.py`;
+2. the damped Newton solver in `core/newton.py`.
 
-Concretely, `shooting.py` defines the nonlinear map
+The file does not implement the time discretization itself. Instead, it receives
+a packed unknown vector `z`, reconstructs the state and costate arrays `(X,P)`,
+and delegates the actual residual or Jacobian assembly to `integrators.py`.
+
+The two public routines are:
+
+```python
+shooting_residual(...)
+shooting_jacobian(...)
+```
+
+They define the nonlinear system
+
 $$
-F:\mathbb{R}^m \to \mathbb{R}^m,
+\begin{equation}
+F(z)=0
+\end{equation}
+$$
+
+and its Jacobian
+
+$$
+\begin{equation}
+J(z)
+=
+\frac{\partial F}{\partial z}.
+\end{equation}
+$$
+
+Newton's method operates on this packed system.
+
+---
+
+## 1) Discrete unknowns and packing convention
+
+Let the time mesh be
+
+$$
+\begin{equation}
+0=t_0<t_1<\cdots<t_N=T.
+\end{equation}
+$$
+
+Let the state and costate dimensions be $n$. The discrete trajectories are
+
+$$
+\begin{equation}
+X_i\approx x(t_i),
 \qquad
-F(z)=0,
+P_i\approx p(t_i),
+\qquad
+i=0,\dots,N.
+\end{equation}
 $$
-where $z$ is the vector of unknown discrete states/costates. Newton never “integrates forward” here: it simply tries to drive $F(z)$ to zero.
+
+The initial state is fixed by the problem:
+
+$$
+\begin{equation}
+X_0=x_0.
+\end{equation}
+$$
+
+Therefore, $X_0$ is not included in the Newton unknown vector. The unknowns are:
+
+- the states $X_1,\dots,X_N$;
+- all costates $P_0,\dots,P_N$.
+
+The packed vector is
+
+$$
+\begin{equation}
+z
+=
+(X_1,\dots,X_N,\;P_0,\dots,P_N)
+\in
+\mathbb{R}^{(2N+1)n}.
+\end{equation}
+$$
+
+This convention is implemented by `pack_unknowns` and `unpack_unknowns` in
+`core/integrators.py`.
+
+Although `shooting.py` imports both helpers, the two wrapper functions mainly
+use `unpack_unknowns`, because they receive an already-packed vector `z`.
 
 ---
 
-## 1) What are the unknowns $z$?
+## 2) Residual system represented by `F(z)`
 
-On a mesh $0=t_0<\dots<t_N=T$ with $x(t)\in\mathbb{R}^n$, we store node values:
+The shooting residual is the vector of all discrete PMP equations plus the
+terminal boundary condition.
 
-- $X_i \approx x(t_i)\in\mathbb{R}^n$, for $i=0,\dots,N$,
-- $P_i \approx p(t_i)\in\mathbb{R}^n$, for $i=0,\dots,N$.
-
-The initial state is fixed: $X_0=x_0$ is **data**, not an unknown.
-
-Therefore the unknown vector is packed as
-$$
-z = (X_1,\dots,X_N,\;P_0,\dots,P_N)\in\mathbb{R}^{(2N+1)n}.
-$$
-
-In code this packing/unpacking is delegated to `core/integrators.py`:
-
-- `pack_unknowns(X,P) -> z`  (flattens and concatenates),
-- `unpack_unknowns(z,x0) -> (X,P)` (reshapes and reinserts $X_0=x_0$).
-
----
-
-## 2) What is the shooting residual map $F(z)$?
-
-Given a candidate trajectory $(X,P)$ (hence a candidate $z$), the residual map $F(z)$ is constructed by enforcing:
-
-1) the symplectic Euler step equations at each interval $[t_i,t_{i+1}]$,
-2) the terminal boundary condition $P_N + \nabla g(X_N)=0$.
-
-All of these are assembled into one vector:
+For each interval $[t_i,t_{i+1}]$, define
 
 $$
+\begin{equation}
+\Delta t_i
+=
+t_{i+1}-t_i.
+\end{equation}
+$$
+
+The current integrator evaluates Hamiltonian gradients at the
+symplectic-Euler point
+
+$$
+\begin{equation}
+(P_{i+1},X_i,t_i).
+\end{equation}
+$$
+
+The state residual block is
+
+$$
+\begin{equation}
+r_x^i
+=
+X_{i+1}
+-
+X_i
+-
+\Delta t_i
+H_p(P_{i+1},X_i,t_i),
+\qquad
+i=0,\dots,N-1.
+\end{equation}
+$$
+
+The costate residual block is
+
+$$
+\begin{equation}
+r_p^i
+=
+P_i
+-
+P_{i+1}
+-
+\Delta t_i
+H_x(P_{i+1},X_i,t_i),
+\qquad
+i=0,\dots,N-1.
+\end{equation}
+$$
+
+Here
+
+$$
+\begin{equation}
+H_p
+=
+\nabla_p H,
+\qquad
+H_x
+=
+\nabla_x H.
+\end{equation}
+$$
+
+Depending on the mode, these gradients come either from the smoothed PA
+Hamiltonian $H_\delta$ or from explicit Hamiltonian-gradient callbacks supplied
+by the problem.
+
+The terminal cost is $g(X_N)$. In the current code, the terminal boundary
+condition is
+
+$$
+\begin{equation}
+P_N-\nabla g(X_N)=0.
+\end{equation}
+$$
+
+Thus the terminal residual block is
+
+$$
+\begin{equation}
+r_{\mathrm{bc}}
+=
+P_N-\nabla g(X_N).
+\end{equation}
+$$
+
+The full residual vector is
+
+$$
+\begin{equation}
 F(z)
 =
 \begin{bmatrix}
-r_x^{(0)}\\
-r_p^{(0)}\\
+r_x^0\\
+r_p^0\\
 \vdots\\
-r_x^{(N-1)}\\
-r_p^{(N-1)}\\
+r_x^{N-1}\\
+r_p^{N-1}\\
 r_{\mathrm{bc}}
-\end{bmatrix}
-\in\mathbb{R}^{(2N+1)n}.
+\end{bmatrix}.
+\end{equation}
 $$
 
-This assembly is implemented in `core/integrators.assemble_residual(...)`.
+Each $r_x^i$ and $r_p^i$ lies in $\mathbb{R}^n$, and
+$r_{\mathrm{bc}}\in\mathbb{R}^n$. Therefore,
 
-### Dimension check
-
-- For each time step $i$ we have:
-  - $r_x^{(i)}\in\mathbb{R}^n$,
-  - $r_p^{(i)}\in\mathbb{R}^n$,
-  hence $2Nn$ equations total.
-- Terminal boundary condition adds $r_{\mathrm{bc}}\in\mathbb{R}^n$.
-
-So
 $$
-\dim(F)=2Nn+n=(2N+1)n=\dim(z),
+\begin{equation}
+F(z)
+\in
+\mathbb{R}^{(2N+1)n}.
+\end{equation}
 $$
-i.e. the shooting system is **square**.
+
+This matches the dimension of $z$, so the shooting system is square.
 
 ---
 
-## 3) What does `shooting.py` actually provide?
+## 3) Current function signatures
 
-At a practical level, this file exposes utilities to evaluate:
-
-- the residual vector $F(z)$,
-- (optionally) its Jacobian matrix $J(z)\approx \partial F/\partial z$,
-
-by calling the integrator layer.
-
-The conceptual structure is:
+The current residual wrapper is
 
 ```python
-# pseudo-structure (not exact code)
-def F_of_z(z):
-    X, P = unpack_unknowns(z, x0)
-    return assemble_residual(problem, t_nodes, X, P, bundle, delta)
-
-def J_of_z(z):
-    X, P = unpack_unknowns(z, x0)
-    return assemble_jacobian(problem, t_nodes, X, P, bundle, delta)
+def shooting_residual(
+    problem,
+    t_nodes: np.ndarray,
+    z: np.ndarray,
+    bundle,
+    delta: float,
+    use_explicit_gradients: bool = False,
+) -> np.ndarray:
+    ...
 ```
 
-So `shooting.py` does not contain the numerical discretization itself; it *wraps* it into a Newton-ready interface.
+The current Jacobian wrapper is
+
+```python
+def shooting_jacobian(
+    problem,
+    t_nodes: np.ndarray,
+    z: np.ndarray,
+    bundle,
+    delta: float,
+    use_explicit_gradients: bool = False,
+) -> np.ndarray:
+    ...
+```
+
+The shared arguments are:
+
+| Argument | Meaning |
+|---|---|
+| `problem` | The `OCPProblem` instance. It supplies $x_0$, dynamics, costs, terminal cost, and optional Hamiltonian-gradient callbacks. |
+| `t_nodes` | The current time mesh. |
+| `z` | Packed Newton unknown vector containing $X_1,\dots,X_N,P_0,\dots,P_N$. |
+| `bundle` | PA bundle used by the smoothed Hamiltonian, unless explicit-gradient mode is active. |
+| `delta` | Smoothing parameter for the smoothed PA Hamiltonian. |
+| `use_explicit_gradients` | If `True`, the integrator layer may use problem-provided Hamiltonian gradients instead of the smoothed PA gradients. |
+
+The wrappers do not modify these inputs. They unpack `z`, call the integrator
+layer, and return the requested residual or Jacobian.
 
 ---
 
-## 4) How Newton uses this module
+## 4) `shooting_residual`
 
-Newton requires:
+The residual wrapper is implemented as
 
-- a function returning the current residual $F(z)$,
-- a function returning (or approximating) the Jacobian $J(z)$,
-- an initial guess $z^{(0)}$.
+```python
+def shooting_residual(...):
+    x0 = problem.x0
+    X, P = unpack_unknowns(z, x0)
+    return assemble_residual(
+        problem,
+        t_nodes,
+        X,
+        P,
+        bundle,
+        delta,
+        use_explicit_gradients=use_explicit_gradients,
+    )
+```
 
-This module supplies the first two, while the initialization and iteration logic lives in `core/newton.py`.
+The workflow is:
 
-A typical Newton step is:
+1. read the fixed initial condition from the problem;
+2. unpack the Newton vector `z` into arrays `X` and `P`;
+3. call `assemble_residual`;
+4. return the residual vector.
+
+Mathematically, this evaluates
+
 $$
-J(z^{(k)})\,\Delta z^{(k)} = -F(z^{(k)}),
+\begin{equation}
+F(z)
+=
+F\bigl(
+X(z),P(z);
+t_{\mathrm{nodes}},U_{\mathrm{bundle}},\delta
+\bigr).
+\end{equation}
+$$
+
+The function `shooting_residual` does not know the details of each residual
+block. Those details live in `integrators.py`.
+
+---
+
+## 5) `shooting_jacobian`
+
+The Jacobian wrapper is implemented as
+
+```python
+def shooting_jacobian(...):
+    x0 = problem.x0
+    X, P = unpack_unknowns(z, x0)
+    return assemble_jacobian(
+        problem,
+        t_nodes,
+        X,
+        P,
+        bundle,
+        delta,
+        use_explicit_gradients=use_explicit_gradients,
+    )
+```
+
+The workflow is:
+
+1. read the fixed initial condition from the problem;
+2. unpack the Newton vector `z` into arrays `X` and `P`;
+3. call `assemble_jacobian`;
+4. return the Jacobian matrix.
+
+Mathematically, this evaluates
+
+$$
+\begin{equation}
+J(z)
+=
+\frac{\partial F}{\partial z}(z).
+\end{equation}
+$$
+
+The current Jacobian assembly is handled by `integrators.py`. It uses the local
+block structure of the residual and assembles a sparse matrix. Some derivative
+blocks are approximated by finite differences locally, but `shooting.py` itself
+does not build those finite differences.
+
+---
+
+## 6) Explicit-gradient mode
+
+Both wrappers accept
+
+```python
+use_explicit_gradients: bool = False
+```
+
+and pass it directly to the integrator layer.
+
+When `use_explicit_gradients=True`, and when the problem provides the required
+Hamiltonian-gradient callback, the residual assembly can use explicit
+Hamiltonian gradients instead of gradients from the smoothed PA Hamiltonian.
+
+Conceptually, this changes the source of
+
+$$
+\begin{equation}
+H_p,
 \qquad
-z^{(k+1)} = z^{(k)} + \alpha\,\Delta z^{(k)}.
+H_x,
+\end{equation}
 $$
 
-Because $F(z)$ is constructed as “all step residuals + terminal BC”, driving $F(z)\to 0$ means:
-
-- every discrete symplectic Euler update is satisfied, and
-- the terminal transversality condition is satisfied.
-
-That is exactly the discrete TPBVP solution.
+inside the residual blocks, but it does not change the packing convention or the
+structure of the shooting system.
 
 ---
 
-## 5) Notes on implementation choices
+## 7) How `newton.py` uses these wrappers
 
-- The repo uses **finite differences** to build Jacobians (via the integrator layer). This is expensive for large $(N,n)$ but is acceptable for a first version and small test cases.
-- The smoothing parameter $\delta$ enters only through Hamiltonian evaluations inside `assemble_residual`, so from Newton’s perspective it is just another parameter passed through the residual function.
-- The PA bundle influences $H_\delta$ and its gradients; `shooting.py` treats the bundle as a fixed object passed into residual/Jacobian evaluation.
+The Newton solver constructs residual and Jacobian functions around the current
+mesh, bundle, and smoothing parameter.
+
+Conceptually:
+
+```python
+def residual(z):
+    return shooting_residual(
+        problem,
+        t_nodes,
+        z,
+        bundle,
+        delta,
+        use_explicit_gradients=use_explicit_hamiltonian_gradients,
+    )
+
+def jacobian(z):
+    return shooting_jacobian(
+        problem,
+        t_nodes,
+        z,
+        bundle,
+        delta,
+        use_explicit_gradients=use_explicit_hamiltonian_gradients,
+    )
+```
+
+Newton then solves linearized systems of the form
+
+$$
+\begin{equation}
+J(z^{(k)})
+\Delta z^{(k)}
+=
+-F(z^{(k)}),
+\end{equation}
+$$
+
+and updates
+
+$$
+\begin{equation}
+z^{(k+1)}
+=
+z^{(k)}
++
+\alpha
+\Delta z^{(k)},
+\end{equation}
+$$
+
+where $\alpha$ is chosen by the damping or line-search logic in `newton.py`.
+
+Thus `shooting.py` supplies the Newton-ready map $F(z)$ and Jacobian $J(z)$,
+while `newton.py` controls the nonlinear iteration.
 
 ---
+
+## 8) What `shooting.py` does not do
+
+This file is intentionally small. It does **not**:
+
+1. construct the initial guess;
+2. pack the initial arrays into `z` for the Newton solve;
+3. implement the symplectic Euler residual blocks;
+4. compute Hamiltonian gradients directly;
+5. build finite-difference Jacobian blocks;
+6. perform line search or damping;
+7. update the adaptive mesh or PA bundle.
+
+Those tasks are handled by other modules:
+
+| Task | Module |
+|---|---|
+| Initial packing and Newton iteration | `newton.py` |
+| Residual and Jacobian assembly | `integrators.py` |
+| Smoothed Hamiltonian gradients | `smoothing.py` |
+| Explicit Hamiltonian gradients | `problem.py` callbacks |
+| Adaptive mesh/bundle/delta updates | `adaptivity.py` |
+
+The purpose of `shooting.py` is only to translate between the packed Newton
+vector and the array-based residual/Jacobian assembly routines.
+
+---
+
+## 9) Summary
+
+The module `shooting.py` defines the Newton-facing nonlinear shooting system.
+
+The packed unknown vector is
+
+$$
+\begin{equation}
+z
+=
+(X_1,\dots,X_N,P_0,\dots,P_N).
+\end{equation}
+$$
+
+The residual is
+
+$$
+\begin{equation}
+F(z)
+=
+\begin{bmatrix}
+r_x^0\\
+r_p^0\\
+\vdots\\
+r_x^{N-1}\\
+r_p^{N-1}\\
+r_{\mathrm{bc}}
+\end{bmatrix},
+\end{equation}
+$$
+
+with terminal condition
+
+$$
+\begin{equation}
+r_{\mathrm{bc}}
+=
+P_N-\nabla g(X_N).
+\end{equation}
+$$
+
+The two wrappers simply perform
+
+```python
+X, P = unpack_unknowns(z, problem.x0)
+```
+
+and delegate to
+
+```python
+assemble_residual(...)
+assemble_jacobian(...)
+```
+
+This keeps the Newton solver independent of the internal array layout of the
+discrete state and costate trajectories.

@@ -1,332 +1,1028 @@
-# `core/pa_bundle.py` — PA Bundle (`PABundle`)
+# `core/pa_bundle.py` — Piecewise-affine control bundle (`PABundle`)
 
-This module implements the **PA bundle**, the data structure that stores a finite set of candidate controls. The bundle is central to the adaptive smoothed-PMP method because it defines a **piecewise-affine (PA) surrogate Hamiltonian** (PA in the costate variable $p$) and provides reusable control candidates for Hamiltonian minimization across time.
+This module defines the class
 
-In the codebase, the bundle is typically passed around as `bundle`, and the candidate set is accessed as `bundle.controls`.
+```python
+PABundle
+```
+
+The bundle is a small passive container for control candidates. It stores a
+finite list of controls and uses them to evaluate a piecewise-affine surrogate
+Hamiltonian.
+
+The current implementation is intentionally simple:
+
+- it stores controls in `self.controls`;
+- it avoids adding near-duplicate controls;
+- it evaluates the Hamiltonian over the stored controls;
+- it can optionally filter stored controls through local feasibility logic.
+
+It does **not** generate controls by itself, does **not** project controls to
+bounds when inserting them, and does **not** implement a maximum capacity or
+replacement policy.
 
 ---
 
-## 1) Mathematical role of the PA bundle (PA upper bound in $p$)
+## 1) Mathematical role of the PA bundle
 
-For a fixed $(x,t)$, define the Hamiltonian integrand
-$$
-\mathcal{H}(p,x,u,t) := p^\top f(x,u,t) + \ell(x,u,t).
-$$
+For a fixed state $x$, costate $p$, time $t$, and control $u$, define the
+Hamiltonian integrand
 
-The **true Hamiltonian** (minimization convention) is
 $$
-H(p,x,t) := \min_{u\in A}\, \mathcal{H}(p,x,u,t)
-= \min_{u\in A}\Big\{\, p^\top f(x,u,t) + \ell(x,u,t)\,\Big\},
-$$
-where $A=[u_{\min},u_{\max}]$ is the control box.
-
-### Concavity in $p$ and supporting hyperplanes
-
-For each fixed $(x,t)$, the map $p\mapsto H(p,x,t)$ is **concave**, because it is the pointwise minimum of affine functions of $p$. Therefore, for any reference point $\hat p$ and any subgradient $g\in \partial_p H(\hat p,x,t)$,
-$$
-H(p,x,t)\;\le\; H(\hat p,x,t) + g^\top (p-\hat p),\qquad \forall p.
+\begin{equation}
+\mathcal{H}(p,x,u,t)
+=
+p^\top f(x,u,t)
++
+\ell(x,u,t).
+\end{equation}
 $$
 
-By defining  
+The true Hamiltonian in this repository uses the minimum convention:
+
 $$
-g_i(x,t):=\partial_pH(\hat{p}_i,x,t)\\
-d_i(x,t):=H(\hat{p}_i,x,t)-g_i(x,t)\hat{p}_i
+\begin{equation}
+H(p,x,t)
+=
+\min_{u\in A}
+\mathcal{H}(p,x,u,t),
+\end{equation}
 $$
-We construct a piecewise-affine (PA) surrogate
-$$
-\bar{H}(p,x,t)=\min_{1\leq i\leq M}\{g_i(x,t)\cdot p+d_i(x,t)\}
-$$
-which satisfies
-$$
-H(p,x,t)\leq \bar{H}(p,x,t)
-$$
-For the Hamiltonian above, any minimizer $\hat u \in \arg\min_{u\in A}\mathcal{H}(\hat p,x,u,t)$ provides a valid subgradient:
-$$
-g = \partial_p H(\hat p,x,t) = f(x,\hat u,t),
-$$
-and
-$$
-H(\hat p,x,t) = \hat p^\top f(x,\hat u,t) + \ell(x,\hat u,t).
-$$
-Substituting yields the supporting affine upper bound
-$$
-H(p,x,t)\;\le\; f(x,\hat u,t)^\top p + \ell(x,\hat u,t).
-$$
-### Bundle representation and surrogate $\bar H$
+
+where $A$ is the admissible control set.
 
 The PA bundle stores a finite set of controls
+
 $$
-\mathcal{U}_{\mathrm{bundle}} = \{u^{(1)},\dots,u^{(K)}\} \subset A.
+\begin{equation}
+U_{\mathrm{bundle}}
+=
+\{u^{(1)},\dots,u^{(M)}\}.
+\end{equation}
 $$
-For each stored control $u^{(i)}$, define the affine function of $p$ (for the current $(x,t)$)
+
+The bundle surrogate Hamiltonian is
+
 $$
-\phi_i(p;x,t) := g_i(x,t)^\top p + d_i(x,t),
+\begin{equation}
+\bar H(p,x,t)
+=
+\min_{1\le i\le M}
+\left\{
+p^\top f(x,u^{(i)},t)
++
+\ell(x,u^{(i)},t)
+\right\}.
+\end{equation}
+$$
+
+For fixed $(x,t)$, each stored control defines an affine function of $p$:
+
+$$
+\begin{equation}
+\phi_i(p;x,t)
+=
+p^\top f(x,u^{(i)},t)
++
+\ell(x,u^{(i)},t).
+\end{equation}
+$$
+
+Therefore, $\bar H$ is a minimum of affine functions in $p$. It is
+piecewise-affine and generally nonsmooth at points where multiple stored
+controls tie.
+
+---
+
+## 2) Upper-bound interpretation
+
+Assume the bundle controls are admissible controls, so that
+
+$$
+\begin{equation}
+U_{\mathrm{bundle}}
+\subseteq
+A.
+\end{equation}
+$$
+
+Because the true Hamiltonian minimizes over the larger set $A$, while the
+bundle surrogate minimizes only over $U_{\mathrm{bundle}}$, we have
+
+$$
+\begin{equation}
+H(p,x,t)
+\le
+\bar H(p,x,t).
+\end{equation}
+$$
+
+Thus $\bar H$ is an upper approximation of the true minimum Hamiltonian.
+
+This is the basis for the PA-bundle error gap used in the adaptive loop:
+
+$$
+\begin{equation}
+\bar H(p,x,t)-H(p,x,t).
+\end{equation}
+$$
+
+In practice, the adaptive code often compares $\bar H$ with the candidate
+Hamiltonian returned by `compute_H`, which may include box corners, oracle
+controls, scalar bounded minimizers, and bundle controls.
+
+---
+
+## 3) Controls are stored, not affine coefficients
+
+The implementation does not store affine coefficients explicitly. It stores only
+controls:
+
+```python
+self.controls: List[np.ndarray] = []
+```
+
+When the bundle is evaluated at a particular $(p,x,t)$, the affine quantities
+are computed on the fly:
+
+$$
+\begin{equation}
+f_i
+=
+f(x,u^{(i)},t),
 \qquad
-g_i(x,t):= f(x,u^{(i)},t),\quad d_i(x,t):=\ell(x,u^{(i)},t).
-$$
-The **bundle surrogate Hamiltonian** is the minimum over these affine functions:
-$$
-\bar H(p,x,t) := \min_{i=1,\dots,K}\, \phi_i(p;x,t)
-= \min_{u\in \mathcal{U}_{\mathrm{bundle}}}\mathcal{H}(p,x,u,t).
+d_i
+=
+\ell(x,u^{(i)},t),
+\end{equation}
 $$
 
-Because $\mathcal{U}_{\mathrm{bundle}}\subset A$, minimizing over a smaller set can only increase the minimum value, hence $\bar H$ is an **upper bound**:
+so that
+
 $$
-H(p,x,t)\;\le\;\bar H(p,x,t)\qquad \forall (p,x,t).
+\begin{equation}
+\phi_i(p;x,t)
+=
+p^\top f_i+d_i.
+\end{equation}
 $$
 
-### Why this matters
-
-- $\bar H$ is cheap to evaluate (finite minimum / PA model in $p$).
-- The adaptive algorithm monitors the **bundle error indicator**
-  $$
-  \eta_{\mathrm{PA}} \approx \int_0^T\big(\bar H(p(t),x(t),t) - H(p(t),x(t),t)\big)\,dt,
-  $$
-  and refines the bundle when this gap is too large.
-
-> Implementation note: the code typically stores **controls** $u^{(i)}$ (i.e., `bundle.controls`) rather than storing the affine coefficients $(g_i,d_i)$ explicitly. The coefficients are computed **on the fly** via
-> $$
-> g_i(x,t)=f(x,u^{(i)},t),\qquad d_i(x,t)=\ell(x,u^{(i)},t),
-> $$
-> whenever $\bar H(p,x,t)$ needs to be evaluated.
+This design is important: the same stored control can define different affine
+functions at different states and times, because both $f(x,u,t)$ and
+$\ell(x,u,t)$ depend on $(x,t)$.
 
 ---
 
-## 2) Example-driven intuition (Example 1: LQR)
+## 4) Class structure
 
-In Example 1 (LQR), the unconstrained minimizer is generally **interior**:
-$$
-u^*(t) = -\tfrac{1}{2}R^{-1}B^\top p(t)
-\quad\text{(if }\ell \text{ uses }u^\top Ru \text{ without a } \tfrac12 \text{ factor).}
-$$
+The class has four methods:
 
-If you only minimize over **box corners** (extreme points), you often get a poor approximation for $u^*$ unless the bounds are very tight or the solution saturates.
+```python
+class PABundle:
+    def __init__(self):
+        ...
 
-The PA bundle is the mechanism that allows the solver to “discover” and reuse good **interior candidate controls**, so that the discrete minimization can approximate the interior optimum.
+    def num_planes(self) -> int:
+        ...
 
----
+    def add_control(self, u: np.ndarray, tol: float = 1e-8) -> None:
+        ...
 
-## 3) What the bundle stores (conceptual view)
+    def evaluate(
+        self,
+        problem,
+        p: np.ndarray,
+        x: np.ndarray,
+        t: float,
+        dt: float | None = None,
+        *,
+        restricted: bool = True,
+        fallback_unrestricted: bool = True,
+    ) -> tuple:
+        ...
+```
 
-The bundle is a small container holding:
-
-- `controls`: a list/array of control vectors $u^{(k)} \in \mathbb{R}^m$
-- `max_size` / capacity: upper bound on how many controls are kept
-- tolerances for **deduplication**: avoid storing controls that are nearly identical
-
-In practice:
-- controls are always intended to be **feasible** ($u\in A$), enforced via projection/clipping when bounds exist.
-- controls are stored in a stable format (numpy arrays, float dtype).
-
----
-
-## 4) Core operations and how to interpret them
-
-### 4.1 Initialization
-
-A bundle must start with a **non-empty candidate set** to be useful. Typical initial sources:
-
-- corners of the control box (via `OCPProblem.control_bounds`)
-- a small set of random controls in $A$ (optional, depending on the experiment)
-- heuristics or problem-specific initial guesses (rare)
-
-If the bundle is empty and the code does not add corners elsewhere, downstream Hamiltonian minimizations can fail.
+The word "plane" refers to the affine function of $p$ induced by a stored
+control at the current $(x,t)$. Since each stored control produces one affine
+plane, the number of planes equals the number of stored controls.
 
 ---
 
-### 4.2 Insertion / update (adding new candidates)
+## 5) Initialization
 
-Whenever the algorithm finds a “useful” control candidate (e.g., from the smoothed argmin or from a local improvement step), it attempts to add it to the bundle:
+The constructor is
 
-1. **Project to the box** (if bounds exist):
-   $$
-   u \leftarrow \Pi_A(u).
-   $$
-2. **Check near-duplicates**:
-   - if $\|u - u^{(k)}\|$ is below a tolerance for some stored $u^{(k)}$, skip insertion.
-3. **Insert if capacity allows**:
-   - append if current size $< \texttt{max\_size}$.
-4. **Replace if full** (bundle management policy):
-   - if at capacity, replace an existing control using a simple rule (e.g., remove the “least useful” or oldest).
+```python
+def __init__(self):
+    self.controls: List[np.ndarray] = []
+```
 
-> The exact replacement policy is implementation-dependent. The key idea is that the bundle maintains a compact, diverse set of candidate controls.
+So a new bundle starts empty.
 
----
+An empty bundle cannot be evaluated. If `evaluate` is called with no stored
+controls, the code raises
 
-### 4.3 Bundle evaluation: computing $\bar H(p,x,t)$
+```python
+RuntimeError("PABundle has no control candidates to evaluate.")
+```
 
-The bundle evaluates the surrogate Hamiltonian by looping over its stored controls:
+Therefore, the surrounding algorithm must seed the bundle before using it in a
+Hamiltonian evaluation or in the smoothed Hamiltonian.
+
+In the adaptive solver, the initial bundle is created in `adaptivity.py`. When
+control bounds are known, the current code seeds it with
+
 $$
-\bar H(p,x,t) = \min_{u\in \mathcal U_{\mathrm{bundle}}} \mathcal{H}(p,x,u,t).
-$$
-
-This is essentially the same minimization pattern as `compute_H`, but restricted to bundle controls only.
-
-### `evaluate` flow (`pa_bundle.py`)
-
-- If there are no controls (`self.controls` is empty), raise `RuntimeError` (cannot evaluate).
-- Initialize `best_val = np.inf` and `best_idx = -1` as worst-case placeholders.
-- Loop over stored controls with `enumerate` to get both index `i` and control `u`:
-  - Compute `val = float(np.dot(p, problem.f(x, u, t)) + problem.l(x, u, t))`.
-  - If `val` is smaller than `best_val`, update `best_val = val` and `best_idx = i`.
-- After the loop, return `(best_val, best_idx)`: the minimum surrogate Hamiltonian value and the index of the control that achieved it.
-
----
-
-### 4.4 Where do `bundle.controls` come from in this implementation?
-
-`PABundle` is a **passive container**: it does not generate controls by itself. It only stores controls passed to `add_control(u)` and later evaluates
-$$
-\bar H(p,x,t)=\min_{u\in \mathcal U_{\mathrm{bundle}}}\{p^\top f(x,u,t)+\ell(x,u,t)\}.
+\begin{equation}
+u_{\mathrm{mid}}
+=
+\frac{1}{2}(u_{\min}+u_{\max}),
+\qquad
+u_{\min},
+\qquad
+u_{\max}.
+\end{equation}
 $$
 
-In this repository, controls enter the bundle from the **outer adaptivity loop** (`core/adaptivity.py`):
-
-1. **Initialization (seed control).**  
-   At startup the bundle is created empty and seeded with one feasible control `u0`:
-   - if bounds exist, the midpoint $u_0=\tfrac12(u_{\min}+u_{\max})$ is added,
-   - otherwise $u_0=0$ is added.  
-   This prevents `bundle.evaluate(...)` from failing when the bundle is empty.
-
-2. **PA refinement (learning new controls).**  
-   When the PA indicator is too large, the outer loop locates the mesh node with the largest gap
-   $$
-   \bar H(p_i,x_i,t_i) - H(p_i,x_i,t_i),
-   $$
-   where $\bar H$ is computed by `bundle.evaluate(...)` (bundle-only) and $H$ is computed by
-   `compute_H(...)` (finite minimization over **box corners + bundle controls**).
-   The argmin control returned by `compute_H(...)` at the worst-gap node is then inserted:
-   $$
-   u^* \leftarrow \arg\min_{u\in \mathcal U_{\mathrm{cand}}}\{p_i^T f(x_i,u,t_i)+\ell(x_i,u,t_i)\},
-   \qquad
-   \texttt{bundle.add_control}(u^*).
-   $$
-
-**Key takeaway.** The bundle is populated by controls that are discovered as pointwise Hamiltonian minimizers
-during the adaptive loop (plus an initial seed control). The corners of the control box are not necessarily stored
-from the start; instead, they are always available as candidates inside `compute_H(...)` and may be added to the
-bundle later if they become active minimizers.
-
-
-## 5) Relationship to `compute_H(...)`
-
-`compute_H(problem, p, x, t, candidate_controls, ...)` typically uses:
-
-- all **control-box corners**, plus
-- `candidate_controls` (usually `bundle.controls`) projected into the box,
-
-and then returns:
-- `best_val`: the minimum value found among candidates (a finite approximation of $H(p,x,t)$)
-- `best_control`: the candidate achieving that minimum (a finite approximation of an argmin).
-
-So the bundle acts as the “memory” that provides interior controls and stabilizes the Hamiltonian minimization across time.
+If bounds are absent but the control dimension is known, it adds the zero
+control.
 
 ---
 
-## 6) Debugging checklist (high-value checks)
+## 6) `num_planes`
 
-When you see odd behavior (no improvement in $\eta_{\mathrm{PA}}$, weird controls, crashes), check:
+The method
 
-1. **Bundle is non-empty**
-   - `len(bundle.controls) > 0` after initialization.
+```python
+def num_planes(self) -> int:
+    return len(self.controls)
+```
 
-2. **Correct control dimension**
-   - each stored control has shape `(m,)` and consistent `dtype=float`.
+returns the number of stored controls, equivalently the number of affine planes
+available for evaluating the PA surrogate.
 
-3. **Bounds consistency**
-   - if bounds exist, ensure controls are actually within bounds (projection applied).
-   - avoid infinite bounds for corners (can generate `inf` candidates).
+Mathematically,
 
-4. **Dedup tolerance**
-   - too strict: bundle fills with near-duplicates (low diversity).
-   - too loose: useful distinct controls might be rejected.
+$$
+\begin{equation}
+\texttt{num\_planes()}
+=
+|U_{\mathrm{bundle}}|
+=
+M.
+\end{equation}
+$$
 
-5. **Capacity / replacement policy**
-   - if `max_size` is too small, the bundle may not keep enough diversity to reduce $\eta_{\mathrm{PA}}$.
-   - if replacement removes good interior candidates too aggressively, Example 1 quality may degrade.
-
----
-
-## 7) Where the bundle is used
-
-- `core/adaptivity.py`: bundle refinement is triggered by the PA indicator $\eta_{\mathrm{PA}}$.
-- `core/hamiltonian.py`: bundle controls are included as candidate controls for finite minimization.
-- `experiments/ex*.py`: reconstructed controls (plots) often depend on bundle-supported candidate sets.
+This method is used by the adaptive algorithm for logging and for deciding how
+many new support controls to add during PA enrichment.
 
 ---
 
-## 8) Key takeaway
+## 7) `add_control`
 
-The PA bundle stores controls $\{u^{(i)}\}$ and induces a **piecewise-affine upper bound** $\bar H$ of the true Hamiltonian $H$ (upper bound because the minimization is restricted to a subset of admissible controls). It is the main mechanism that makes Hamiltonian evaluation practical and reusable across time, especially in problems where the true minimizer is not captured well by box corners alone (e.g., interior solutions such as LQR).
+The method
 
+```python
+def add_control(self, u: np.ndarray, tol: float = 1e-8) -> None:
+    ...
+```
 
-# Bundle vs. Supergradient Planes — Key Conclusions (from our discussion)
+adds a control to the bundle if it is not already present up to a Euclidean
+tolerance.
 
-## 1) Two different objects: pre-Hamiltonian vs. reduced Hamiltonian
-- Define the **pre-Hamiltonian** (control-dependent):
-  \[
-  g_u(p,x,t) := p^\top f(x,u,t) + \ell(x,u,t).
-  \]
-- Define the **reduced Hamiltonian** (control eliminated):
-  \[
-  H(p,x,t) := \min_{u\in\mathcal U(x,t)} g_u(p,x,t),
-  \]
-  where \(\mathcal U(x,t)\) encodes control bounds and (if used) viability/tangent constraints.
+The current implementation is:
 
-## 2) What the current PA-bundle in the repo actually stores and evaluates
-- The bundle stores a **finite set of controls** \(\mathcal U_B=\{u_1,\dots,u_M\}\).
-- The surrogate is:
-  \[
-  \bar H(p,x,t) := \min_{u\in\mathcal U_B} g_u(p,x,t).
-  \]
-- When the evaluation point changes \((p,x,t)\to(p',x',t')\), the bundle does **not** recompute derivatives or solve a new minimization problem; it simply **re-evaluates** \(f(x',u_i,t')\) and \(\ell(x',u_i,t')\) for the stored \(u_i\) and takes the minimum.
+```python
+u = np.asarray(u, dtype=float)
 
-## 3) Why the control-based bundle is a (global) upper bound
-- Since \(H\) is a minimum over all admissible controls:
-  \[
-  H(p,x,t) \le g_u(p,x,t)\quad \forall u\in\mathcal U(x,t).
-  \]
-- If each stored \(u_i\) is admissible at the evaluation point, then:
-  \[
-  H(p,x,t) \le \bar H(p,x,t)\quad \forall (p,x,t),
-  \]
-  i.e., the surrogate is an **upper bound globally in \((p,x,t)\)**.
-- **Envelope theorem is not what guarantees the upper bound**. The upper bound comes from “minimum over a subset.”  
-  Envelope/Danskin helps in **enrichment**: it tells you how the active control relates to \(\partial_p H\), and motivates adding good controls.
+for v in self.controls:
+    if np.linalg.norm(u - v) < tol:
+        return
 
-## 4) Why the bundle can be a good or bad approximation at a new point
-- Evaluating \(\bar H(p,x,t)\) at a new point is **not** “applying envelope theorem.”
-- A stored control \(u_i\) may have been optimal at \((\hat p_i,\hat x_i,\hat t_i)\), but it may be good or bad at a different \((p,x,t)\).
-- The approximation quality is measured by the gap:
-  \[
-  \bar H(p,x,t) - H(p,x,t) \ge 0,
-  \]
-  which is small only if \(\mathcal U_B\) contains a control near-optimal for that point.
+self.controls.append(u)
+```
 
-## 5) Role of adaptivity (enrichment)
-- If you identify a point where the gap is large, you enrich by computing a “good” (ideally optimal) control \(u^\*(p,x,t)\) for that point and adding it to \(\mathcal U_B\).
-- Adding the true active control at \((\hat p,\hat x,\hat t)\) makes the surrogate **exact at that point** and often improves a neighborhood (unless you are near switching/ties).
+---
 
-## 6) Supergradient-based planes: valid, but not globally reusable in \((x,t)\)
-- For fixed \((x,t)\), \(p\mapsto H(p,x,t)\) is concave, so for \(s\in\partial_p H(\hat p,x,t)\):
-  \[
-  H(p,x,t) \le H(\hat p,x,t) + s^\top(p-\hat p)\quad \forall p.
-  \]
-- If you **freeze** the coefficients (store the plane as a function of \(p\) only) and then reuse it at different \((x',t')\), the upper-bound guarantee generally **breaks**, because the concavity argument is only in \(p\) with \((x,t)\) fixed.
-- A consistent “supergradient bundle” would be **local in \((x,t)\)**: when \((x,t)\) changes, you must recompute \(H(\hat p,x,t)\) and \(\partial_p H(\hat p,x,t)\) (i.e., planes are not reusable across \((x,t)\) unless you can evaluate these quantities as functions).
+### 7.1 Conversion to floating-point NumPy array
 
-## 7) Constraints and viability (restricted Hamiltonian)
-- If using a restricted Hamiltonian
-  \[
-  H_K(p,x,t)=\min_{u:\ f(x,u,t)\in T_K(x)} g_u(p,x,t),
-  \]
-  then to preserve the upper-bound property the surrogate must minimize only over **viable** controls at that \((x,t)\), i.e., apply the same feasibility filter (e.g., `tangent_ok`) consistently.
-- Control bounds are handled by projection/clipping; viability depends on the state and may vary with \((x,t)\).
+The first step is
 
-## 8) “Explicit Hamiltonian” as an optional oracle in a universal solver
-- Knowing a closed form for \(H(p,x,t)\) typically implies you can recover the minimizer \(u^\*(p,x,t)\) (possibly by cases / clipping under bounds).
-- In a universal solver, the clean idea is: **optionally** provide an explicit/oracle evaluation for \(H\) (and ideally \(u^\*\)) when available; otherwise fall back to the current numerical routine.
-- This oracle is most useful to:
-  - speed up computing “true” \(H\) for \(\eta_{PA}\),
-  - provide accurate enrichment controls \(u^\*\),
-  - serve as a benchmark/reference example (e.g., hypersensitive control Example 3.1).
+```python
+u = np.asarray(u, dtype=float)
+```
+
+This ensures that stored controls are NumPy arrays with floating-point dtype.
+
+If the input is a Python list, tuple, or integer array, it is converted before
+being stored.
+
+---
+
+### 7.2 Duplicate check
+
+Before appending the new control, the method checks whether it is close to an
+existing stored control.
+
+A candidate $u$ is considered a duplicate of an existing control $v$ if
+
+$$
+\begin{equation}
+\|u-v\| < \mathrm{tol}.
+\end{equation}
+$$
+
+The default tolerance is
+
+$$
+\begin{equation}
+\mathrm{tol}=10^{-8}.
+\end{equation}
+$$
+
+If such a stored control exists, the method returns immediately and does not add
+anything.
+
+This means that `add_control` is idempotent up to tolerance: calling it many
+times with the same control will not keep growing the bundle.
+
+---
+
+### 7.3 Append if new
+
+If no near-duplicate is found, the control is appended:
+
+```python
+self.controls.append(u)
+```
+
+Thus the bundle grows by one plane.
+
+The method does not return the inserted index. To check whether insertion
+happened, callers compare the bundle size before and after insertion:
+
+```python
+before = bundle.num_planes()
+bundle.add_control(u)
+added = bundle.num_planes() > before
+```
+
+This pattern is used in the adaptive loop.
+
+---
+
+### 7.4 What `add_control` does not do
+
+The current implementation of `add_control` is deliberately minimal.
+
+It does **not**:
+
+1. project the control to bounds;
+2. check whether the control is admissible;
+3. check local feasibility at a state and time;
+4. enforce a maximum bundle size;
+5. replace old controls;
+6. rank controls by usefulness.
+
+Therefore, callers are responsible for projecting or validating controls before
+calling `add_control` when that is needed.
+
+For example, `compute_H` projects candidate controls before evaluation when
+bounds are known, and `adaptivity.py` obtains enrichment controls from
+`compute_H`, which already uses the problem's feasibility logic.
+
+---
+
+## 8) `evaluate`
+
+The method
+
+```python
+def evaluate(
+    self,
+    problem,
+    p: np.ndarray,
+    x: np.ndarray,
+    t: float,
+    dt: float | None = None,
+    *,
+    restricted: bool = True,
+    fallback_unrestricted: bool = True,
+) -> tuple:
+    ...
+```
+
+evaluates the PA-bundle surrogate Hamiltonian at a single point $(p,x,t)$.
+
+It returns
+
+```python
+best_val, best_idx
+```
+
+where `best_val` is the minimum Hamiltonian value over accepted bundle controls,
+and `best_idx` is the index of the active stored control.
+
+---
+
+### 8.1 Mathematical target
+
+Ignoring feasibility filters for a moment, the method computes
+
+$$
+\begin{equation}
+\bar H(p,x,t)
+=
+\min_{u^{(i)}\in U_{\mathrm{bundle}}}
+\left\{
+p^\top f(x,u^{(i)},t)
++
+\ell(x,u^{(i)},t)
+\right\}.
+\end{equation}
+$$
+
+The returned index is
+
+$$
+\begin{equation}
+i^\star
+\in
+\arg\min_i
+\left\{
+p^\top f(x,u^{(i)},t)
++
+\ell(x,u^{(i)},t)
+\right\}.
+\end{equation}
+$$
+
+Thus,
+
+$$
+\begin{equation}
+\texttt{best\_val}
+=
+\bar H(p,x,t),
+\qquad
+\texttt{best\_idx}
+=
+i^\star.
+\end{equation}
+$$
+
+When feasibility filtering is active, the minimization is restricted to the
+stored controls accepted by the local feasibility test.
+
+---
+
+### 8.2 Empty-bundle check
+
+The first branch is
+
+```python
+if not self.controls:
+    raise RuntimeError("PABundle has no control candidates to evaluate.")
+```
+
+An empty bundle cannot define a PA minimum. The caller must ensure that at least
+one control has been inserted before calling `evaluate`.
+
+---
+
+### 8.3 Initialization of the search
+
+The method initializes:
+
+```python
+best_val = np.inf
+best_idx = -1
+tried_any = False
+```
+
+The variable `best_val` stores the smallest Hamiltonian integrand found so far.
+
+The variable `best_idx` stores the index of the control that achieved it.
+
+The variable `tried_any` records whether at least one stored control passed the
+restricted feasibility filter and was evaluated in the main loop.
+
+---
+
+### 8.4 Restricted evaluation loop
+
+The main loop is:
+
+```python
+for i, u in enumerate(self.controls):
+    if restricted and not problem.local_control_feasible(
+        x,
+        u,
+        t,
+        restricted=True,
+        dt=dt,
+    ):
+        continue
+
+    tried_any = True
+    val = float(np.dot(p, problem.f(x, u, t)) + problem.l(x, u, t))
+
+    if val < best_val:
+        best_val = val
+        best_idx = i
+```
+
+If `restricted=True`, each stored control is checked with
+
+```python
+problem.local_control_feasible(x, u, t, restricted=True, dt=dt)
+```
+
+The optional `dt` is passed through because some problems use local
+step-size-dependent feasibility.
+
+If the control fails this check, it is skipped.
+
+For every accepted control, the code computes
+
+$$
+\begin{equation}
+\mathcal{H}(p,x,u^{(i)},t)
+=
+p^\top f(x,u^{(i)},t)
++
+\ell(x,u^{(i)},t).
+\end{equation}
+$$
+
+The minimum value and active index are updated whenever a smaller value is
+found.
+
+---
+
+### 8.5 Meaning of `restricted`
+
+When `restricted=True`, the bundle surrogate is effectively
+
+$$
+\begin{equation}
+\bar H_{\mathrm{loc}}(p,x,t;\Delta t)
+=
+\min_{\substack{
+u^{(i)}\in U_{\mathrm{bundle}}\\
+u^{(i)}\ \mathrm{locally\ feasible}
+}}
+\left\{
+p^\top f(x,u^{(i)},t)
++
+\ell(x,u^{(i)},t)
+\right\}.
+\end{equation}
+$$
+
+When `restricted=False`, the local feasibility check is skipped in the main
+loop, and all stored controls are evaluated.
+
+---
+
+### 8.6 Unrestricted fallback
+
+After the main loop, it is possible that no control was evaluated because all
+stored controls failed the restricted feasibility check.
+
+This case is detected by
+
+```python
+if fallback_unrestricted and not tried_any:
+    ...
+```
+
+If `fallback_unrestricted=True`, the method performs a second pass over all
+stored controls without the feasibility filter:
+
+```python
+for i, u in enumerate(self.controls):
+    val = float(np.dot(p, problem.f(x, u, t)) + problem.l(x, u, t))
+    if val < best_val:
+        best_val = val
+        best_idx = i
+```
+
+This fallback returns a bundle minimum even when the restricted feasible subset
+is empty.
+
+If `fallback_unrestricted=False`, this second pass is skipped.
+
+This option is important in the adaptive PA-error computation. In some places,
+the code wants the restricted PA value to fail clearly if no locally feasible
+bundle control exists, so it calls
+
+```python
+bundle.evaluate(..., restricted=True, fallback_unrestricted=False)
+```
+
+---
+
+### 8.7 Failure after evaluation
+
+If no active control is found, the method raises
+
+```python
+RuntimeError("PABundle has no locally feasible control candidates to evaluate.")
+```
+
+This can happen when:
+
+1. the bundle is non-empty;
+2. `restricted=True`;
+3. all stored controls fail `problem.local_control_feasible`;
+4. `fallback_unrestricted=False`.
+
+It can also happen if some unexpected numerical issue prevents any valid value
+from being selected.
+
+---
+
+### 8.8 Return value
+
+If evaluation succeeds, the method returns
+
+```python
+return best_val, best_idx
+```
+
+where
+
+$$
+\begin{equation}
+\texttt{best\_val}
+=
+p^\top f(x,u^{(i^\star)},t)
++
+\ell(x,u^{(i^\star)},t),
+\end{equation}
+$$
+
+and
+
+$$
+\begin{equation}
+\texttt{best\_idx}
+=
+i^\star.
+\end{equation}
+$$
+
+The active control itself can be recovered as
+
+```python
+u_active = bundle.controls[best_idx]
+```
+
+The returned index is used by the adaptive loop for diagnostics, such as
+recording which PA plane is active at each mesh node.
+
+---
+
+## 9) Interaction with `smoothing.py`
+
+The smoothing routine `eval_H_smooth` uses
+
+```python
+bundle.controls
+```
+
+directly to build the smoothed PA Hamiltonian.
+
+If
+
+$$
+\begin{equation}
+U_{\mathrm{bundle}}
+=
+\{u^{(1)},\dots,u^{(M)}\},
+\end{equation}
+$$
+
+then `smoothing.py` forms the plane values
+
+$$
+\begin{equation}
+g_i(p,x,t)
+=
+p^\top f(x,u^{(i)},t)
++
+\ell(x,u^{(i)},t),
+\end{equation}
+$$
+
+and computes the soft minimum
+
+$$
+\begin{equation}
+H_\delta(p,x,t)
+=
+-\delta
+\log
+\left(
+\sum_{i=1}^M
+\exp
+\left(
+-\frac{g_i(p,x,t)}{\delta}
+\right)
+\right).
+\end{equation}
+$$
+
+Unlike `PABundle.evaluate`, the default smoothing routine does **not** call
+`problem.local_control_feasible` for each stored control. It assumes that the
+bundle has already been built consistently by the surrounding solver.
+
+Therefore, the same bundle can be used in two related but distinct ways:
+
+1. `bundle.evaluate(...)` computes a hard minimum over stored controls, with
+   optional local feasibility filtering;
+2. `eval_H_smooth(...)` computes a soft minimum over stored controls, without
+   re-filtering them.
+
+---
+
+## 10) Interaction with `hamiltonian.py`
+
+The routine `compute_H` uses `bundle.controls` as one part of a larger candidate
+set.
+
+The candidate set used by `compute_H` may contain:
+
+1. an oracle control from `problem.u_star(...)`;
+2. control-box corners;
+3. a scalar bounded minimizer when the control is scalar and bounded;
+4. the controls already stored in the PA bundle.
+
+Schematically,
+
+$$
+\begin{equation}
+\mathcal{U}_{cand}
+=
+\mathcal{U}_{oracle}
+\cup
+\mathcal{U}_{corners}
+\cup
+\mathcal{U}_{scalar}
+\cup
+U_{\mathrm{bundle}}.
+\end{equation}
+$$
+
+Thus `bundle.evaluate(...)` computes the bundle-only surrogate
+
+$$
+\begin{equation}
+\bar H(p,x,t)
+=
+\min_{u\in U_{\mathrm{bundle}}}
+\mathcal{H}(p,x,u,t),
+\end{equation}
+$$
+
+whereas `compute_H(...)` computes a richer candidate Hamiltonian
+
+$$
+\begin{equation}
+H_{cand}(p,x,t)
+=
+\min_{u\in\mathcal{U}_{cand}}
+\mathcal{H}(p,x,u,t).
+\end{equation}
+$$
+
+When $U_{\mathrm{bundle}}\subseteq\mathcal{U}_{cand}$ and compatible feasibility
+filters are used,
+
+$$
+\begin{equation}
+H_{cand}(p,x,t)
+\le
+\bar H(p,x,t).
+\end{equation}
+$$
+
+The adaptive loop uses this gap to decide when the PA bundle needs enrichment.
+
+---
+
+## 11) Interaction with `adaptivity.py`
+
+The adaptive loop is responsible for creating and enriching the bundle.
+
+At startup, `adaptivity.py` creates
+
+```python
+bundle = PABundle()
+```
+
+and seeds it with basic controls. If bounds are available, it adds
+
+$$
+\begin{equation}
+u_{\mathrm{mid}}
+=
+\frac{1}{2}(u_{\min}+u_{\max}),
+\qquad
+u_{\min},
+\qquad
+u_{\max}.
+\end{equation}
+$$
+
+If bounds are absent but the control dimension is known, it adds the zero
+control.
+
+During the first outer iteration, the adaptive loop may call
+
+```python
+bootstrap_bundle_from_trajectory(...)
+```
+
+to add controls that are active or approximately active along the first coarse
+trajectory.
+
+Later, when the PA indicator is too large, the adaptive loop selects one or
+more enrichment nodes. At those nodes, it uses `compute_H` to find candidate
+controls and then calls
+
+```python
+bundle.add_control(candidate_u)
+```
+
+If the control is not a duplicate, it becomes a new PA plane.
+
+Thus `PABundle` itself does not decide which controls are important. It only
+stores the controls selected by the adaptive algorithm.
+
+---
+
+## 12) Restricted PA evaluation in adaptivity
+
+The adaptive loop sometimes evaluates the PA surrogate with
+
+```python
+bundle.evaluate(
+    problem,
+    P[i],
+    X[i],
+    t_nodes[i],
+    dt=dt_i,
+    restricted=True,
+    fallback_unrestricted=False,
+)
+```
+
+The option `fallback_unrestricted=False` is important. It means:
+
+- if no stored bundle control is locally feasible at the point;
+- and restricted evaluation is requested;
+
+then `evaluate` should raise an error rather than silently returning an
+unrestricted PA value.
+
+This is useful when computing PA gaps, because the code wants the restricted
+bundle value and the restricted candidate Hamiltonian to be consistent.
+
+Other calls use the default `fallback_unrestricted=True`, allowing a more robust
+diagnostic value even if all stored controls fail the local feasibility filter.
+
+---
+
+## 13) Debugging checklist
+
+When the PA bundle behaves unexpectedly, check the following points.
+
+---
+
+### 13.1 Bundle non-emptiness
+
+Check
+
+```python
+bundle.num_planes() > 0
+```
+
+An empty bundle cannot be evaluated and cannot define a smoothed Hamiltonian.
+
+---
+
+### 13.2 Duplicate controls
+
+If a call to
+
+```python
+bundle.add_control(u)
+```
+
+does not increase `bundle.num_planes()`, the new control was probably within
+the duplicate tolerance of an existing control:
+
+$$
+\begin{equation}
+\|u-v\| < 10^{-8}.
+\end{equation}
+$$
+
+This is normal behavior.
+
+---
+
+### 13.3 Control shape
+
+Each stored control should be a one-dimensional NumPy array:
+
+```python
+u.shape == (m,)
+```
+
+Avoid column vectors such as `(m, 1)`, because they can lead to unexpected NumPy
+broadcasting in norms, dot products, or comparisons.
+
+---
+
+### 13.4 Bounds and projection
+
+`add_control` does not project controls. If bounds are required, projection must
+happen before insertion or during candidate generation.
+
+If controls appear outside the admissible box, check the caller that inserted
+them.
+
+---
+
+### 13.5 Local feasibility
+
+If `bundle.evaluate(..., restricted=True)` fails with
+
+```python
+RuntimeError("PABundle has no locally feasible control candidates to evaluate.")
+```
+
+then all stored controls failed
+
+```python
+problem.local_control_feasible(...)
+```
+
+at the current $(x,t,\Delta t)$.
+
+Possible causes include:
+
+- the bundle controls are not appropriate near the current state;
+- the local feasibility test is too strict;
+- the time step `dt` is too large for step-feasibility constraints;
+- the bundle needs to be refreshed after mesh refinement.
+
+---
+
+### 13.6 Smoothing includes all stored controls
+
+Remember that `eval_H_smooth` uses all stored controls directly and does not
+re-check local feasibility. If a control should not participate in smoothing,
+the issue must be addressed when constructing or refreshing the bundle.
+
+---
+
+## 14) Summary
+
+`PABundle` is a passive memory of control candidates.
+
+It stores
+
+$$
+\begin{equation}
+U_{\mathrm{bundle}}
+=
+\{u^{(1)},\dots,u^{(M)}\},
+\end{equation}
+$$
+
+and evaluates
+
+$$
+\begin{equation}
+\bar H(p,x,t)
+=
+\min_{u\in U_{\mathrm{bundle}}}
+\left\{
+p^\top f(x,u,t)+\ell(x,u,t)
+\right\}.
+\end{equation}
+$$
+
+The current implementation provides only:
+
+1. storage of controls;
+2. duplicate-safe insertion;
+3. hard-min evaluation with optional local feasibility filtering;
+4. active-plane index reporting.
+
+All higher-level decisions — how to seed the bundle, when to add controls, and
+which controls to add — are handled by the adaptive solver.
