@@ -1,0 +1,1 @@
+"""Core modules for the Pontryagin-based adaptive solver."""

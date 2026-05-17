@@ -1,0 +1,15 @@
+{
+  "example": "ex6_paper_example32",
+  "wall_time_sec": 20.091839916014578,
+  "max_iters": 32,
+  "N_final": 108,
+  "M_final": 3,
+  "delta_final": 1.4901161193847657e-10,
+  "eta_time": 5.84331168042528e-08,
+  "eta_PA": 0.0,
+  "eta_delta": 8.784708442325252e-11,
+  "len_t_nodes": 109,
+  "use_oracle_bootstrap": false,
+  "use_oracle_PA": false,
+  "use_explicit_hamiltonian_gradients": false
+}
