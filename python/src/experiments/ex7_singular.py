@@ -540,6 +540,8 @@ def _generate_report_tex(out_dir, summary, input_rows, reference_rows, outer_row
             ).strip()
         )
 
+    iteration_sections_text = "\n\n".join(iteration_sections)
+
     tex = dedent(
         f"""
         \\documentclass[11pt]{{article}}
@@ -580,7 +582,7 @@ def _generate_report_tex(out_dir, summary, input_rows, reference_rows, outer_row
         \\end{{figure}}
 
         \\section{{Per-Iteration Dossier}}
-        {"\n\n".join(iteration_sections)}
+        {iteration_sections_text}
 
         \\end{{document}}
         """

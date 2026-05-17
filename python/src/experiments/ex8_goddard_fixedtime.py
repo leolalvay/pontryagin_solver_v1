@@ -1077,6 +1077,8 @@ def _generate_report_tex(out_dir, summary, input_rows, reference_rows, outer_row
                 """
             ).strip()
         )
+    iteration_sections_text = "\n\n".join(iteration_sections)
+
     tex = dedent(
         f"""
         \\documentclass[11pt]{{article}}
@@ -1117,7 +1119,7 @@ def _generate_report_tex(out_dir, summary, input_rows, reference_rows, outer_row
         \\end{{figure}}
 
         \\section{{Per-Iteration Dossier}}
-        {"\n\n".join(iteration_sections)}
+        {iteration_sections_text}
         \\end{{document}}
         """
     ).strip() + "\n"
@@ -1553,6 +1555,8 @@ def export_goddard_barrier_handoff_rich_report_artifacts(barrier_run, handoff_bu
     handoff_tex = Path(handoff_report_path).read_text()
     handoff_body = handoff_tex.split("\\section{Per-Iteration Dossier}", 1)[1].rsplit("\\end{document}", 1)[0].strip()
 
+    barrier_stage_sections_text = "\n\n".join(barrier_stage_sections)
+
     tex = dedent(
         f"""
         \\documentclass[11pt]{{article}}
@@ -1597,7 +1601,7 @@ def export_goddard_barrier_handoff_rich_report_artifacts(barrier_run, handoff_bu
         \\end{{figure}}
 
         \\section{{Barrier Stage Dossier}}
-        {"\n\n".join(barrier_stage_sections)}
+        {barrier_stage_sections_text}
 
         \\section{{True Constrained Handoff Outer-Loop Summary}}
         {_latex_longtable_from_rows("Adaptive outer-loop iterations of the true constrained handoff at $q_{{\\max}}=19$.", "tab:goddard19-outer", outer_fields, outer_display_rows)}

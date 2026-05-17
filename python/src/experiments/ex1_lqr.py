@@ -58,10 +58,10 @@ def build_ex1_lqr_problem(u_min=-11.0, u_max=5.0):
 
 def run_ex1_lqr_solver(
     n_init=20,
-    tol_time=2e-2,
+    tol_time=1e-2,
     tol_PA=1e-2,
     tol_delta=1e-2,
-    max_iters=15,
+    max_iters=20,
     delta0=0.15,
     u_min=-11.0,
     u_max=5.0,
@@ -927,6 +927,8 @@ def _generate_example1_report_tex(out_dir, summary, input_rows, reference_rows, 
             ).strip()
         )
 
+    iteration_sections_text = "\n\n".join(iteration_sections)
+
     report = dedent(
         f"""
         \\documentclass[11pt]{{article}}
@@ -974,7 +976,7 @@ def _generate_example1_report_tex(out_dir, summary, input_rows, reference_rows, 
         \\end{{figure}}
 
         \\section{{Per-Iteration Dossier}}
-        {"\n\n".join(iteration_sections)}
+        {iteration_sections_text}
 
         \\end{{document}}
         """

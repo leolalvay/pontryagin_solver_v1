@@ -782,6 +782,8 @@ def _generate_ex32_report_tex(out_dir, summary, input_rows, reference_rows, oute
             ).strip()
         )
 
+    iteration_sections_text = "\n\n".join(iteration_sections)
+
     report = dedent(
         f"""
         \\documentclass[11pt]{{article}}
@@ -829,7 +831,7 @@ def _generate_ex32_report_tex(out_dir, summary, input_rows, reference_rows, oute
         \\end{{figure}}
 
         \\section{{Per-Iteration Dossier}}
-        {"\n\n".join(iteration_sections)}
+        {iteration_sections_text}
 
         \\end{{document}}
         """
